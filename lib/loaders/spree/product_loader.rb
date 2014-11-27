@@ -385,7 +385,8 @@ module DataShift
 
           parent_name = name_list.shift
 
-          parent_taxonomy = @@taxonomy_klass.find_or_create_by_name(parent_name)
+          #GroupMember.where(:member_id => 4, :group_id => 7).first_or_create
+          parent_taxonomy = @@taxonomy_klass.where(:name=>parent_name).first_or_create
 
           raise DataShift::DataProcessingError.new("Could not find or create Taxonomy #{parent_name}") unless parent_taxonomy
 
