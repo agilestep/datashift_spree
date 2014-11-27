@@ -396,7 +396,10 @@ module DataShift
           taxons = name_list.collect do |name|
 
             begin
-              taxon = @@taxon_klass.find_or_create_by_name_and_parent_id_and_taxonomy_id(name, parent && parent.id, parent_taxonomy.id)
+              taxon = @@taxon_klass.where(:name =>name,:parent_id => parent.id ,:taxonomy_id=> parent_taxonomy.id).first_or_create
+                  #find_or_create_by_name_and_parent_id_and_taxonomy_id(name, parent && parent.id, parent_taxonomy.id)
+
+              #@company = Company.where(name: name).first_or_create
 
               unless(taxon)
                 puts "Not found or created so now what ?"
