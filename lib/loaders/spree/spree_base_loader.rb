@@ -38,6 +38,9 @@ module DataShift
       @@taxonomy_klass ||= DataShift::SpreeHelper::get_spree_class('Taxonomy')
       @@taxon_klass ||= DataShift::SpreeHelper::get_spree_class('Taxon')
       @@variant_klass ||= DataShift::SpreeHelper::get_spree_class('Variant')
+      @@stockItem_klass ||= DataShift::SpreeHelper::get_spree_class('StockItem')
+      @@translation_klass ||= DataShift::SpreeHelper::get_spree_class('Translation')
+
     end
 
     

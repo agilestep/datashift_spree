@@ -8,26 +8,21 @@
 require 'spree_base_loader'
 require 'spree_helper'
 
+
 module DataShift
-
   module SpreeHelper
-
     class ProductLoader < SpreeBaseLoader
 
       # Options
-      #  
+      #
       #  :reload           : Force load of the method dictionary for object_class even if already loaded
       #  :verbose          : Verbose logging and to STDOUT
       #
       def initialize(product = nil, options = {})
-
         # We want the delegated methods on Variant so always include instance methods
         opts = {:instance_methods => true}.merge( options )
-
         # depending on version get_product_class should return us right class, namespaced or not
-
         super( DataShift::SpreeHelper::get_product_class(), true, product, opts)
-
         raise "Failed to create Product for loading" unless @load_object
       end
 
@@ -35,30 +30,47 @@ module DataShift
       #   [:dummy]           : Perform a dummy run - attempt to load everything but then roll back
       #
       def perform_load( file_name, opts = {} )
-        
         logger.info "Product load from File [#{file_name}]"
-            
+
         options = opts.dup
 
         #puts "Product Loader -  Load Options", options.inspect
 
         # In >= 1.1.0 Image moved to master Variant from Product so no association called Images on Product anymore
-        
+
         # Non Product/database fields we can still  process
-        @we_can_process_these_anyway =  ['images',  "variant_price", "variant_sku"]
-          
+        @we_can_process_these_anyway =  ['images',  "variant_price", "variant_sku","p_count","translation"]
+
+
         # In >= 1.3.0 price moved to master Variant from Product so no association called Price on Product anymore
         # taking care of it here, means users can still simply just include a price column
         @we_can_process_these_anyway << 'price' if(DataShift::SpreeHelper::version.to_f >= 1.3 )
-      
+
         if(DataShift::SpreeHelper::version.to_f > 1 )
           options[:force_inclusion] = options[:force_inclusion] ? ([ *options[:force_inclusion]] + @we_can_process_these_anyway) : @we_can_process_these_anyway
         end
 
         logger.info "Product load using forced operators: [#{options[:force_inclusion]}]" if(options[:force_inclusion])
-        
+
         super(file_name, options)
       end
+
+
+      def add_items_on_hand
+
+        save_if_new
+        property_list = get_each_assoc
+        property_list.each do |prop|
+          item_counter = @@stockItem_klass.create()
+          item_counter.set_count_on_hand(prop)
+          item_counter.product = @load_object
+          item_counter.save
+        end
+
+
+
+      end
+
 
       # Over ride base class process with some Spree::Product specifics
       #
@@ -66,17 +78,59 @@ module DataShift
       # Method map represents a column from a file and it's correlated Product association.
       # Value string which may contain multiple values for a collection (has_many) association.
       #
-      def process(method_detail, value)  
-
+      def process(method_detail, value)
         raise ProductLoadError.new("Cannot process #{value} NO details found to assign to") unless(method_detail)
-          
+
+
+
         # TODO - start supporting assigning extra data via current_attribute_hash
+
         current_value, current_attribute_hash = @populator.prepare_data(method_detail, value)
-         
+
         current_method_detail = method_detail
-       
-        logger.debug "Processing value: [#{current_value}]"
-        
+
+
+        logger.info "Processing value: [#{current_value}]"
+
+        if(current_value && (current_method_detail.operator?('p_count')))
+
+
+         #add_items_on_hand
+          return
+
+        end
+
+        ProductLoader.log_g "METHOD = " + current_method_detail.name
+
+        if(current_value && (current_method_detail.name =='translation'))
+          ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
+
+          list=  get_each_assoc
+          list.each do |element|
+
+            title = element.split(":").first
+            description = element.split(":").count >1 ?  (element.split(":").last) : nil
+
+            begin
+              ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
+            #Spree::Product::Translation.create!(:spree_product_id => @load_object.id, :locale => "en", :name => title, :description => description)
+
+              trans = Spree::Product::Translation.find_or_initialize_by(:spree_product_id => @load_object.id)
+              trans.update(:locale => "en",:name => title, :description => description )
+
+
+            rescue Exception => ex
+
+                ProductLoader.log_g "TRANSLATION EX = "  + ex.message
+
+                logger.info "failed to create translation process method , ex = #{ex.message}"
+            end
+          end
+          return
+        end
+
+
+
         # Special cases for Products, generally where a simple one stage lookup won't suffice
         # otherwise simply use default processing from base class
         if(current_value && (current_method_detail.operator?('variants') || current_method_detail.operator?('option_types')) )
@@ -96,6 +150,7 @@ module DataShift
           add_images( (SpreeHelper::version.to_f > 1) ? @load_object.master : @load_object )
 
         elsif(current_method_detail.operator?('variant_price') && current_value)
+          puts "Newly Loaded Object Size #{@load_object.variants.size}"
 
           if(@load_object.variants.size > 0)
 
@@ -105,8 +160,10 @@ module DataShift
               values = current_value.to_s.split(Delimiters::multi_assoc_delim)
 
               if(@load_object.variants.size == values.size)
-                @load_object.variants.each_with_index {|v, i| v.price = values[i].to_f }
-                @load_object.save
+                @load_object.variants.each_with_index do |v, i|
+                  v.price = values[i].to_f
+                  v.save
+                end
               else
                 puts "WARNING: Price entries did not match number of Variants - None Set"
               end
@@ -115,7 +172,7 @@ module DataShift
           else
             super
           end
-          
+
         elsif(current_method_detail.operator?('variant_sku') && current_value)
 
           if(@load_object.variants.size > 0)
@@ -136,14 +193,17 @@ module DataShift
           else
             super
           end
-          
+
         elsif(current_value && (current_method_detail.operator?('count_on_hand') || current_method_detail.operator?('on_hand')) )
 
-          # CURRENTLY BROKEN FOR Spree 2.2 - New Stock management : 
+          # CURRENTLY BROKEN FOR Spree 2.2 - New Stock management :
           # http://guides.spreecommerce.com/developer/inventory.html
-          
+
           logger.warn("NO STOCK SET - count_on_hand BROKEN - needs updating for new StockManagement in Spree >= 2.2")
-          return
+          # return
+
+
+
 
           # Unless we can save here, in danger of count_on_hand getting wiped out.
           # If we set (on_hand or count_on_hand) on an unsaved object, during next subsequent save
@@ -170,7 +230,7 @@ module DataShift
                 @load_object.variants.each_with_index {|v, i| v.on_hand = values[i].to_i }
                 @load_object.save
               else
-                puts "WARNING: Count on hand entries did not match number of Variants - None Set"
+                puts "WARNING: #{values.size} count on hand entries #{current_value} did not match #{@load_object.variants.size} variants - None Set"
               end
             end
 
@@ -204,12 +264,12 @@ module DataShift
       #  '|' seperates Variants
       #
       #   ';' list of option values
-      #  Examples : 
-      #  
+      #  Examples :
+      #
       #     mime_type:jpeg;print_type:black_white|mime_type:jpeg|mime_type:png, PDF;print_type:colour
       #
       def add_options_variants
-      
+
         # TODO smart column ordering to ensure always valid by time we get to associations
         begin
           save_if_new
@@ -221,10 +281,10 @@ module DataShift
         variants = get_each_assoc
 
         logger.info "add_options_variants #{variants.inspect}"
-        
-        # example line becomes :  
-        #   1) mime_type:jpeg|print_type:black_white  
-        #   2) mime_type:jpeg  
+
+        # example line becomes :
+        #   1) mime_type:jpeg|print_type:black_white
+        #   2) mime_type:jpeg
         #   3) mime_type:png, PDF|print_type:colour
 
         variants.each do |per_variant|
@@ -232,7 +292,7 @@ module DataShift
           option_types = per_variant.split(Delimiters::multi_facet_delim)    # => [mime_type:jpeg, print_type:black_white]
 
           logger.info "add_options_variants #{option_types.inspect}"
-           
+
           optiontype_vlist_map = {}
 
           option_types.each do |ostr|
@@ -252,7 +312,7 @@ module DataShift
               logger.info "Created missing OptionType #{option_type.inspect}"
               puts "Created missing OptionType #{option_type.inspect}"
             end
-                      
+
             # OptionTypes must be specified first on Product to enable Variants to be created
             # TODO - is include? very inefficient ??
             @load_object.option_types << option_type unless @load_object.option_types.include?(option_type)
@@ -271,49 +331,55 @@ module DataShift
           # Now create set of Variants, some of which maybe composites
           # Find the longest set of OVs to use as base for combining with the rest
           sorted_map = optiontype_vlist_map.sort_by { |k,v| v.size }.reverse
-       
+
+
+
+
           # [ [mime, ['pdf', 'jpeg', 'gif']], [print_type, ['black_white']] ]
-          
+
           lead_option_type, lead_ovalues = sorted_map.shift
-          
           # TODO .. benchmarking to find most efficient way to create these but ensure Product.variants list
           # populated .. currently need to call reload to ensure this (seems reqd for Spree 1/Rails 3, wasn't required b4
           lead_ovalues.each do |ovname|
-
             ov_list = []
-
             ovname.strip!
-            
-            ov = @@option_value_klass.find_or_create_by_name_and_option_type_id(ovname, lead_option_type.id, :presentation => ovname.humanize)
+            name = ovname
+            presentation = ovname.humanize
+            option_type_id = lead_option_type.id
 
+            ov = @@option_value_klass.find_or_create_by(name: name, option_type_id: option_type_id,
+                presentation: presentation)
             ov_list << ov if ov
- 
+
             # Process rest of array of types => values
-            sorted_map.each do |ot, ovlist| 
+            sorted_map.each do |ot, ovlist|
               ovlist.each do |for_composite|
-                
+
                 for_composite.strip!
-                
-                ov = @@option_value_klass.find_or_create_by_name_and_option_type_id(for_composite, ot.id, :presentation => for_composite.humanize)
+                ov = @@option_value_klass.find_or_create_by(for_composite, ot.id, :presentation => for_composite.humanize)
 
                 ov_list << ov if(ov)
               end
             end
 
             unless(ov_list.empty?)
-              
+
               logger.info("Creating Variant from OptionValue(s) #{ov_list.collect(&:name).inspect}")
-              
+
               i = @load_object.variants.size + 1
+              variant_position = 1
 
               # This one line seems to works for 1.1.0 - 3.2 but not 1.0.0 - 3.1 ??
-							if(SpreeHelper::version.to_f >= 1.1)
-							  variant = @load_object.variants.create( :sku => "#{@load_object.sku}_#{i}", :price => @load_object.price, :weight => @load_object.weight, :height => @load_object.height, :width => @load_object.width, :depth => @load_object.depth)
-							else
-							  variant = @@variant_klass.create( :product => @load_object, :sku => "#{@load_object.sku}_#{i}", :price => @load_object.price)
-							end
+              if(SpreeHelper::version.to_f >= 1.1)
+                variant = @load_object.variants.create( :price => @load_object.price,
+                                                        :position => variant_position)
+                variant_position += 1
+                puts "Variant #{variant}"
+              else
+                variant = @@variant_klass.create( :product => @load_object, :price => @load_object.price)
+              end
 
-              variant.option_values << ov_list if(variant)    
+              variant.option_values << ov_list if(variant)
             end
           end
 
@@ -337,12 +403,15 @@ module DataShift
 
         property_list.each do |pstr|
 
+
+
           # Special case, we know we lookup on name so operator is effectively the name to lookup
           find_by_name, find_by_value = get_find_operator_and_rest( pstr )
 
           raise "Cannot find Property via #{find_by_name} (with value #{find_by_value})" unless(find_by_name)
 
           property = @@property_klass.find_by_name(find_by_name)
+
 
           unless property
             property = @@property_klass.create( :name => find_by_name, :presentation => find_by_name.humanize)
@@ -372,6 +441,17 @@ module DataShift
       # TAXON FORMAT
       # name|name>child>child|name
 
+
+
+      def self.log_g text
+        open('./log/product.log', 'a+') { |f|
+          f.puts DateTime.now.to_s + "   " + text
+        }
+      end
+
+
+
+
       def add_taxons
         # TODO smart column ordering to ensure always valid by time we get to associations
         save_if_new
@@ -385,10 +465,12 @@ module DataShift
 
           parent_name = name_list.shift
 
-          #GroupMember.where(:member_id => 4, :group_id => 7).first_or_create
-          parent_taxonomy = @@taxonomy_klass.where(:name=>parent_name).first_or_create
 
-          raise DataShift::DataProcessingError.new("Could not find or create Taxonomy #{parent_name}") unless parent_taxonomy
+
+          parent_taxonomy = @@taxonomy_klass.find_or_create_by(:name=> parent_name.strip) # # @@taxonomy_klass.where(:name=> parent_name).first_or_create  #
+
+
+          raise DataShift::DataProcessingError.new("Could not find or create Taxonomy #{parent_name.strip}") unless parent_taxonomy
 
           parent = parent_taxonomy.root
 
@@ -396,10 +478,9 @@ module DataShift
           taxons = name_list.collect do |name|
 
             begin
-              taxon = @@taxon_klass.where(:name =>name,:parent_id => parent.id ,:taxonomy_id=> parent_taxonomy.id).first_or_create
-                  #find_or_create_by_name_and_parent_id_and_taxonomy_id(name, parent && parent.id, parent_taxonomy.id)
+              #taxon = @@taxon_klass.find_or_create_by_name_and_parent_id_and_taxonomy_id(name, parent && parent.id, parent_taxonomy.id)
 
-              #@company = Company.where(name: name).first_or_create
+              taxon = @@taxon_klass.find_or_create_by(:name=> name.strip ,:parent_id=> parent && parent.id ,:taxonomy_id=> parent_taxonomy.id )
 
               unless(taxon)
                 puts "Not found or created so now what ?"
@@ -421,12 +502,16 @@ module DataShift
           logger.debug("Product assigned to Taxons : #{unique_list.collect(&:name).inspect}")
 
           @load_object.taxons << unique_list unless(unique_list.empty?)
-          # puts @load_object.taxons.inspect
 
         end
-
       end
 
+      def get_translations
+
+        #item = Spree::Product.find_by(:name => product_attrs[:name])
+        #@load_object
+        #Spree::Product::Translation.create!(:spree_product_id => item.id, :locale => "ru", :name => "#{product_attrs[:runame]}", :description => "#{product_attrs[:rudescription]}")
+      end
     end
   end
 end
