@@ -39,7 +39,7 @@ module DataShift
         # In >= 1.1.0 Image moved to master Variant from Product so no association called Images on Product anymore
 
         # Non Product/database fields we can still  process
-        @we_can_process_these_anyway =  ['images',  "variant_price", "variant_sku","p_count","translation"]
+        @we_can_process_these_anyway =  ['images',  "variant_price", "variant_sku","p_count","translation","taxons_ru"]
 
 
         # In >= 1.3.0 price moved to master Variant from Product so no association called Price on Product anymore
@@ -103,31 +103,19 @@ module DataShift
         ProductLoader.log_g "METHOD = " + current_method_detail.name
 
         if(current_value && (current_method_detail.name =='translation'))
-          ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
-
-          list=  get_each_assoc
-          list.each do |element|
-
-            title = element.split(":").first
-            description = element.split(":").count >1 ?  (element.split(":").last) : nil
-
-            begin
-              ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
-            #Spree::Product::Translation.create!(:spree_product_id => @load_object.id, :locale => "en", :name => title, :description => description)
-
-              trans = Spree::Product::Translation.find_or_initialize_by(:spree_product_id => @load_object.id)
-              trans.update(:locale => "en",:name => title, :description => description )
-
-
-            rescue Exception => ex
-
-                ProductLoader.log_g "TRANSLATION EX = "  + ex.message
-
-                logger.info "failed to create translation process method , ex = #{ex.message}"
-            end
-          end
+          add_translation
           return
         end
+
+        #HAI
+
+        if(current_value && (current_method_detail.name =='taxons_ru'))
+
+
+           extract_ru_taxons
+
+        end
+
 
 
 
@@ -248,6 +236,33 @@ module DataShift
         else
           super
         end
+      end
+
+      def add_translation
+        ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
+
+        list=  get_each_assoc
+        list.each do |element|
+
+          title = element.split(":").first
+          description = element.split(":").count >1 ?  (element.split(":").last) : nil
+
+          begin
+            ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
+            #Spree::Product::Translation.create!(:spree_product_id => @load_object.id, :locale => "en", :name => title, :description => description)
+
+            trans = Spree::Product::Translation.find_or_initialize_by(:spree_product_id => @load_object.id)
+            trans.update(:locale => "en",:name => title, :description => description )
+
+
+          rescue Exception => ex
+
+            ProductLoader.log_g "TRANSLATION EX = "  + ex.message
+
+            logger.info "failed to create translation process method , ex = #{ex.message}"
+          end
+        end
+
       end
 
       private
@@ -449,6 +464,19 @@ module DataShift
         }
       end
 
+      def extract_ru_taxons
+        @taxons_translations =  []
+        chain_list = get_each_assoc
+        chain_list.each do |chain|
+           taxon_set = []
+          name_list = chain.split(/\s*>\s*/)
+           taxon_set << name_list.shift
+          name_list.each do |el|
+            taxon_set << el
+          end
+           @taxons_translations << taxon_set
+        end
+      end
 
 
 
@@ -458,7 +486,7 @@ module DataShift
 
         chain_list = get_each_assoc  # potentially multiple chains in single column (delimited by Delimiters::multi_assoc_delim)
 
-        chain_list.each do |chain|
+        chain_list.each_with_index do |chain,index_main|
 
           # Each chain can contain either a single Taxon, or the tree like structure parent>child>child
           name_list = chain.split(/\s*>\s*/)
@@ -469,12 +497,16 @@ module DataShift
 
           parent_taxonomy = @@taxonomy_klass.find_or_create_by(:name=> parent_name.strip) # # @@taxonomy_klass.where(:name=> parent_name).first_or_create  #
 
+          trans = Spree::Taxonomy::Translation.find_or_initialize_by(:spree_taxonomy_id => parent_taxonomy.id,:locale => "ru")
+          trans.update(:locale => "ru",:name => @taxons_translations[index_main][0])
+
 
           raise DataShift::DataProcessingError.new("Could not find or create Taxonomy #{parent_name.strip}") unless parent_taxonomy
 
           parent = parent_taxonomy.root
 
           # Add the Taxons to Taxonomy from tree structure parent>child>child
+
           taxons = name_list.collect do |name|
 
             begin
