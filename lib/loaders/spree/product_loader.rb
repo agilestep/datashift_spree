@@ -449,7 +449,7 @@ module DataShift
 
 
       def self.log_g text
-        open('./log/product.log', 'a+') { |f|
+        open('./log/datashif.log', 'a+') { |f|
           f.puts DateTime.now.to_s + "   " + text
         }
       end
@@ -494,6 +494,8 @@ module DataShift
 
           parent_name = name_list.shift
 
+
+          next if !parent_name or !name_list
 
           parent_taxonomy = @@taxonomy_klass.find_or_create_by(:name=> parent_name.strip) # # @@taxonomy_klass.where(:name=> parent_name).first_or_create  #
 
