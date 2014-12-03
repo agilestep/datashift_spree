@@ -32,6 +32,8 @@ module DataShift
       def perform_load( file_name, opts = {} )
         logger.info "Product load from File [#{file_name}]"
 
+
+
         options = opts.dup
 
         #puts "Product Loader -  Load Options", options.inspect
@@ -39,7 +41,7 @@ module DataShift
         # In >= 1.1.0 Image moved to master Variant from Product so no association called Images on Product anymore
 
         # Non Product/database fields we can still  process
-        @we_can_process_these_anyway =  ['images',  "variant_price", "variant_sku","p_count","translation","taxons_ru"]
+        @we_can_process_these_anyway =  ["variant_price", "variant_sku","translation","taxons_ru","taxons", "price_ru","price_eu","stock",'images']
 
 
         # In >= 1.3.0 price moved to master Variant from Product so no association called Price on Product anymore
@@ -56,20 +58,7 @@ module DataShift
       end
 
 
-      def add_items_on_hand
 
-        save_if_new
-        property_list = get_each_assoc
-        property_list.each do |prop|
-          item_counter = @@stockItem_klass.create()
-          item_counter.set_count_on_hand(prop)
-          item_counter.product = @load_object
-          item_counter.save
-        end
-
-
-
-      end
 
 
       # Over ride base class process with some Spree::Product specifics
@@ -81,10 +70,6 @@ module DataShift
       def process(method_detail, value)
         raise ProductLoadError.new("Cannot process #{value} NO details found to assign to") unless(method_detail)
 
-
-
-        # TODO - start supporting assigning extra data via current_attribute_hash
-
         current_value, current_attribute_hash = @populator.prepare_data(method_detail, value)
 
         current_method_detail = method_detail
@@ -92,32 +77,30 @@ module DataShift
 
         logger.info "Processing value: [#{current_value}]"
 
-        if(current_value && (current_method_detail.operator?('p_count')))
-
-
-         #add_items_on_hand
+        if(current_value && (current_method_detail.operator?('stock')))
+            add_items_on_hand
           return
-
         end
 
-        ProductLoader.log_g "METHOD = " + current_method_detail.name
+
+
+        if(current_value && (current_method_detail.name =='price_ru' || current_method_detail.name =='price_eu' ) )
+          add_additional_prices current_method_detail
+           return
+        end
 
         if(current_value && (current_method_detail.name =='translation'))
           add_translation
           return
+
         end
 
         #HAI
 
         if(current_value && (current_method_detail.name =='taxons_ru'))
-
-
            extract_ru_taxons
-
+          return
         end
-
-
-
 
         # Special cases for Products, generally where a simple one stage lookup won't suffice
         # otherwise simply use default processing from base class
@@ -126,7 +109,6 @@ module DataShift
           add_options_variants
 
         elsif(current_method_detail.operator?('taxons') && current_value)
-
           add_taxons
 
         elsif(current_method_detail.operator?('product_properties') && current_value)
@@ -190,9 +172,6 @@ module DataShift
           logger.warn("NO STOCK SET - count_on_hand BROKEN - needs updating for new StockManagement in Spree >= 2.2")
           # return
 
-
-
-
           # Unless we can save here, in danger of count_on_hand getting wiped out.
           # If we set (on_hand or count_on_hand) on an unsaved object, during next subsequent save
           # looks like some validation code or something calls Variant.on_hand= with 0
@@ -239,8 +218,6 @@ module DataShift
       end
 
       def add_translation
-        ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
-
         list=  get_each_assoc
         list.each do |element|
 
@@ -248,7 +225,6 @@ module DataShift
           description = element.split(":").count >1 ?  (element.split(":").last) : nil
 
           begin
-            ProductLoader.log_g   " !!!! START GETTING TRANSLATION !!!! "
             #Spree::Product::Translation.create!(:spree_product_id => @load_object.id, :locale => "en", :name => title, :description => description)
 
             trans = Spree::Product::Translation.find_or_initialize_by(:spree_product_id => @load_object.id)
@@ -256,13 +232,27 @@ module DataShift
 
 
           rescue Exception => ex
-
-            ProductLoader.log_g "TRANSLATION EX = "  + ex.message
-
             logger.info "failed to create translation process method , ex = #{ex.message}"
           end
         end
 
+      end
+
+      def add_items_on_hand
+        property_list = get_each_assoc
+        property_list.each do |prop|
+
+          begin
+            item = @@stockItem_klass.find_by(:variant_id => @load_object.id)
+            item = @@stockItem_klass.create  if !item
+            item.stock_location=Spree::StockLocation.first_or_create!(name: 'default')
+            item.variant_id =@load_object.id
+            item.set_count_on_hand(prop)
+            item.save
+          rescue  Exception =>  ex
+            logger.error " Exception on creationg stock item = " + ex.message
+          end
+        end
       end
 
       private
@@ -465,16 +455,25 @@ module DataShift
       end
 
       def extract_ru_taxons
-        @taxons_translations =  []
+
         chain_list = get_each_assoc
+        @big_table = []
+        total_children = 0
         chain_list.each do |chain|
-           taxon_set = []
           name_list = chain.split(/\s*>\s*/)
-           taxon_set << name_list.shift
-          name_list.each do |el|
-            taxon_set << el
-          end
-           @taxons_translations << taxon_set
+
+           parent = name_list.shift
+
+          @big_table << parent
+
+
+           name_list.each do |el|
+             @big_table << el
+
+            #total_children+=1
+           end
+
+
         end
       end
 
@@ -482,6 +481,8 @@ module DataShift
 
       def add_taxons
         # TODO smart column ordering to ensure always valid by time we get to associations
+
+        general_index = 0
         save_if_new
 
         chain_list = get_each_assoc  # potentially multiple chains in single column (delimited by Delimiters::multi_assoc_delim)
@@ -494,12 +495,14 @@ module DataShift
           parent_name = name_list.shift
 
 
-
           parent_taxonomy = @@taxonomy_klass.find_or_create_by(:name=> parent_name.strip) # # @@taxonomy_klass.where(:name=> parent_name).first_or_create  #
 
-          trans = Spree::Taxonomy::Translation.find_or_initialize_by(:spree_taxonomy_id => parent_taxonomy.id,:locale => "ru")
-          trans.update(:locale => "ru",:name => @taxons_translations[index_main][0])
 
+        #  trans = Spree::Taxonomy::Translation.find_or_create_by(:spree_taxonomy_id => parent_taxonomy.id,:locale => "en")
+         # trans.name = @big_table[general_index]
+          #trans.save
+
+          general_index+=1
 
           raise DataShift::DataProcessingError.new("Could not find or create Taxonomy #{parent_name.strip}") unless parent_taxonomy
 
@@ -514,6 +517,10 @@ module DataShift
 
               taxon = @@taxon_klass.find_or_create_by(:name=> name.strip ,:parent_id=> parent && parent.id ,:taxonomy_id=> parent_taxonomy.id )
 
+            #  trans1 = Spree::Taxon::Translation.find_or_create_by(:spree_taxon_id => taxon.id,:locale => "en" )
+             # trans1.name = @big_table[general_index]
+              #trans1.save
+              general_index+=1
               unless(taxon)
                 puts "Not found or created so now what ?"
               end
@@ -538,12 +545,30 @@ module DataShift
         end
       end
 
-      def get_translations
 
-        #item = Spree::Product.find_by(:name => product_attrs[:name])
-        #@load_object
-        #Spree::Product::Translation.create!(:spree_product_id => item.id, :locale => "ru", :name => "#{product_attrs[:runame]}", :description => "#{product_attrs[:rudescription]}")
+
+      def add_additional_prices current_method_detail
+
+        chain_list = get_each_assoc  # potentially multiple chains in single column (delimited by Delimiters::multi_assoc_delim)
+
+        chain_list.each do |money|
+
+            if current_method_detail.name=="price_eu"
+              price= Spree::Price.find_or_create_by(:variant_id => @load_object.id,:currency=>"EUR" )
+              price.amount= money.to_d.round(2)
+              price.save
+            else
+              price= Spree::Price.find_or_create_by(:variant_id => @load_object.id,:currency=>"RUB" )
+              price.amount= money.to_d.round(2)
+              price.save
+            end
+
+        end
+
       end
-    end
+
+
+
   end
-end
+  end
+  end
