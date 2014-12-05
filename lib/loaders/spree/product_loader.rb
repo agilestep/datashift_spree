@@ -30,9 +30,9 @@ module DataShift
       #   [:dummy]           : Perform a dummy run - attempt to load everything but then roll back
       #
       def perform_load( file_name, opts = {} )
+
+
         logger.info "Product load from File [#{file_name}]"
-
-
 
         options = opts.dup
 
@@ -54,6 +54,7 @@ module DataShift
 
         logger.info "Product load using forced operators: [#{options[:force_inclusion]}]" if(options[:force_inclusion])
 
+
         super(file_name, options)
       end
 
@@ -68,6 +69,11 @@ module DataShift
       # Value string which may contain multiple values for a collection (has_many) association.
       #
       def process(method_detail, value)
+        begin
+
+
+        ProductLoader.log_g "Process =" +  method_detail.name.to_s
+
         raise ProductLoadError.new("Cannot process #{value} NO details found to assign to") unless(method_detail)
 
         current_value, current_attribute_hash = @populator.prepare_data(method_detail, value)
@@ -76,6 +82,38 @@ module DataShift
 
 
         logger.info "Processing value: [#{current_value}]"
+
+
+        if(current_value && (current_method_detail.operator?('sku')))
+          @sku_to_remember= get_each_assoc.first
+        end
+
+        if(current_value && (current_method_detail.operator?('slug')))
+
+          #Post.includes(:votes)
+          #Employee.
+          #joins(:company => :addresses).
+           #   where(:addresses => { :city => 'Porto Alegre' })
+
+
+          spree=  Spree::Variant.joins(:product).where("spree_variants.product_id = spree_products.id and spree_variants.is_master = ? and spree_variants.sku = ? and spree_products.slug= ? ",'True',@sku_to_remember,get_each_assoc.first)
+
+         #object_to_update =  @load_object_class.joins(:variants).find_by(:slug=> get_each_assoc.first,:variants => {:sku =>@load_object_class.master.sku })
+
+         if spree.count > 0
+
+           #ProductLoader.log_g
+           ProductLoader.log_g "ID = "  + spree.first.attributes["product_id"].to_s
+           object_to_update = Spree::Product.find(spree.first.attributes["product_id"])
+           object_to_update.name = @load_object.name
+           object_to_update.description = @load_object.description
+           object_to_update.master.sku =@sku_to_remember
+           object_to_update.shipping_category = Spree::ShippingCategory.find_by_name!("Default")
+
+           @load_object = object_to_update
+         end
+
+        end
 
         if(current_value && (current_method_detail.operator?('stock')))
             add_items_on_hand
@@ -215,7 +253,13 @@ module DataShift
         else
           super
         end
+        rescue Exception => ex
+          ProductLoader.log_g "Message =#{ex.message} backtrace = #{ex.backtrace} "
+          throw ex
       end
+      end
+
+
 
       def add_translation
         list=  get_each_assoc
@@ -243,10 +287,10 @@ module DataShift
         property_list.each do |prop|
 
           begin
-            item = @@stockItem_klass.find_by(:variant_id => @load_object.id)
+            item = @@stockItem_klass.find_by(:variant_id => @load_object.master.id)
             item = @@stockItem_klass.create  if !item
             item.stock_location=Spree::StockLocation.first_or_create!(name: 'default')
-            item.variant_id =@load_object.id
+            item.variant_id =@load_object.master.id
             item.set_count_on_hand(prop)
             item.save
           rescue  Exception =>  ex
@@ -556,11 +600,13 @@ module DataShift
         chain_list.each do |money|
 
             if current_method_detail.name=="price_eu"
-              price= Spree::Price.find_or_create_by(:variant_id => @load_object.id,:currency=>"EUR" )
+
+
+              price= Spree::Price.find_or_create_by(:variant_id => @load_object.master.id,:currency=>"EUR" )
               price.amount= money.to_d.round(2)
               price.save
             else
-              price= Spree::Price.find_or_create_by(:variant_id => @load_object.id,:currency=>"RUB" )
+              price= Spree::Price.find_or_create_by(:variant_id => @load_object.master.id,:currency=>"RUB" )
               price.amount= money.to_d.round(2)
               price.save
             end
